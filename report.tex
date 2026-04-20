@@ -6,146 +6,299 @@
 \usepackage{graphicx}
 \usepackage{float}
 \usepackage{caption}
+\usepackage{enumitem}
+\usepackage{url}
+\usepackage{microtype}
 
-\title{Comparing SGD, SVRG, and SAGA for Regularized Logistic Regression}
+\captionsetup{font=small}
+\setlist[itemize]{leftmargin=*, itemsep=2pt, topsep=3pt}
+\setlist[enumerate]{leftmargin=*, itemsep=2pt, topsep=3pt}
+\setlength{\textfloatsep}{10pt plus 2pt minus 2pt}
+\setlength{\floatsep}{10pt plus 2pt minus 2pt}
+\setlength{\intextsep}{10pt plus 2pt minus 2pt}
+\renewcommand{\arraystretch}{1.08}
+
+\title{A Reproducibility Study of SGD, SVRG, and SAGA on Regularized Logistic Regression}
 \author{Jihyun Kim and William Zhang}
 \date{}
 
 \begin{document}
 \maketitle
 
+\begin{abstract}
+This project studies three stochastic optimization methods on the same convex
+finite-sum problem: L2-regularized binary logistic regression on the
+\texttt{sklearn} breast cancer dataset. The methods are stochastic gradient
+descent (SGD), stochastic variance-reduced gradient (SVRG), and SAGA. The main
+goal is not to claim a new algorithm, but to reproduce and compare the practical
+behavior of these methods under one controlled setup. We evaluate convergence,
+wall-clock runtime, gradient-evaluation cost, stability across random seeds, and
+memory usage. The main question is how much benefit we get from variance
+reduction, and what it costs in extra computation or storage. The final results
+show that SVRG reached the lowest final objective in the locked run, SAGA was
+competitive when tuned to its best learning rate, and SGD was the cheapest
+method in memory and gradient work.
+\end{abstract}
+
 \section{Introduction}
 
-The goal of this project was to compare three stochastic optimization methods on
-the same convex machine learning problem. The methods were stochastic gradient
-descent (SGD), stochastic variance-reduced gradient (SVRG), and SAGA. All three
-methods were tested on L2-regularized logistic regression using the breast
-cancer dataset from \texttt{sklearn}.
+Stochastic gradient methods are a standard tool for machine learning
+optimization. They are attractive because each update can be much cheaper than
+computing a full gradient over the whole dataset. The downside is that a single
+sample gradient is noisy. This noise can make the objective decrease unevenly,
+especially when the method gets close to a good solution.
 
-This is a useful comparison because the three methods make different tradeoffs.
-SGD is simple and cheap per iteration, but its gradient estimates can stay noisy.
-SVRG reduces this noise by occasionally computing a full gradient at a snapshot
-point. SAGA also reduces variance, but it does this by storing past gradients
-for all samples. Because of this, the main question is not only which method
-reaches the lowest objective value, but also how much extra computation and
-memory that improvement costs.
+Variance-reduced methods try to keep the low per-iteration cost of stochastic
+methods while making the update direction more reliable. In this project, we
+compare plain SGD with two variance-reduced methods, SVRG and SAGA. The study is
+set up as a paper reading and reproducibility project rather than a new method
+proposal. The goal is to implement the algorithms, run them on a clean convex
+problem, and understand the tradeoffs that appear in practice.
 
-The main result was that SVRG reached the lowest final objective value in the
-locked comparison, but it used about three times as many gradient evaluations as
-SGD. SAGA was competitive when tuned well, especially at learning rate 0.03, but
-at the locked learning rate 0.1 it was less stable than SVRG. SGD was the
-simplest and usually fastest method in wall-clock time, but its final loss was
-higher and its trajectory had more noise.
+The problem we use is L2-regularized logistic regression on the breast cancer
+dataset from \texttt{sklearn}. This is a useful test case because the objective
+is convex, the dataset is small enough to inspect carefully, and the finite-sum
+structure matches the setting where SVRG and SAGA are usually discussed. We
+focus on four practical questions:
+\begin{itemize}
+    \item Which method reduces the objective fastest at the beginning?
+    \item Which method reaches the best final objective value?
+    \item How much do the methods differ in runtime and gradient evaluations?
+    \item How do memory cost and stability change when using variance reduction?
+\end{itemize}
 
-\section{Problem Setup}
+\section{Background and Motivation}
 
-The optimization problem was binary logistic regression with L2 regularization.
-For data points $(x_i, y_i)$ with labels $y_i \in \{-1, +1\}$, the objective was
+For empirical risk minimization problems, the objective often has the form
+\[
+F(\theta) = \frac{1}{n}\sum_{i=1}^{n} f_i(\theta) + r(\theta),
+\]
+where $f_i$ is the loss for one training example and $r$ is a regularization
+term. Full gradient descent uses all $n$ examples for every update, which gives
+a stable direction but can be expensive for large datasets. SGD instead samples
+one example, or a mini-batch, and uses that gradient as an estimate of the full
+gradient.
+
+The main motivation for SVRG and SAGA is that the stochastic gradient in SGD can
+have high variance. Even when the current point is near the optimum, a single
+sample gradient may point in a noticeably different direction from the full
+gradient. Because of this, SGD often needs a decreasing learning rate or it
+keeps fluctuating near the solution.
+
+Variance-reduced methods use extra information to reduce this noise. SVRG uses
+periodic full-gradient calculations at a snapshot point. SAGA stores past
+per-sample gradients and uses their average as a correction. Both methods spend
+extra resources to get a better update direction. In convex finite-sum settings,
+this is the high-level reason these methods can converge faster than plain SGD
+when the learning rate is chosen well.
+
+I do not prove any new theoretical results in this project. The relevant theory
+from the literature says, roughly, that variance-reduced methods can improve the
+convergence behavior for finite-sum convex problems because their gradient
+estimates become more accurate as the iterates approach a solution. For this
+report, I treat that theory as motivation and then test whether the expected
+tradeoffs show up in my implementation.
+
+\section{Problem Formulation}
+
+The dataset is \texttt{sklearn.datasets.load\_breast\_cancer}. It has
+569 samples and 30 features. The
+features are standardized before optimization. The original binary labels are
+converted to
+\[
+y_i \in \{-1,+1\}.
+\]
+After conversion, the class counts are 212 samples with label $-1$ and 357
+samples with label $+1$.
+
+The model is binary logistic regression with parameters $w \in \mathbb{R}^d$
+and bias $b \in \mathbb{R}$. The objective is
 \[
 F(w,b)
-= \frac{1}{n} \sum_{i=1}^{n}
-\log\left(1 + \exp\left(-y_i(w^\top x_i + b)\right)\right)
+= \frac{1}{n}\sum_{i=1}^{n}
+\log\left(1+\exp\left(-y_i(w^\top x_i+b)\right)\right)
 + \frac{\lambda}{2}\|w\|_2^2 .
 \]
-The bias term $b$ was not regularized.
-
-The dataset was \texttt{sklearn.datasets.load\_breast\_cancer}. It has 569
-examples and 30 features. The labels were converted from the original
-\texttt{\{0,1\}} format to $\{-1,+1\}$. The features were standardized using
-\texttt{StandardScaler}. The class counts after conversion were 212 examples
-with label $-1$ and 357 examples with label $+1$.
-
-All runs used
+The regularization parameter is
 \[
 \lambda = 10^{-3}.
 \]
-The starting point was the zero vector for both $w$ and $b$. At this point the
-objective value was 0.69314718. I also checked the implementation of the
-gradient using finite differences. The maximum finite-difference error reported
-by the project code was $7.173 \times 10^{-11}$, and the mean of the
-per-sample gradients matched the full gradient up to numerical precision.
+The bias term is not regularized.
+
+For implementation, I store the parameters as one vector
+\[
+\theta = (w,b) \in \mathbb{R}^{d+1}.
+\]
+The full gradient is used for objective checking and for SVRG snapshot steps.
+The per-sample gradient is used by all three stochastic methods. I also checked
+the gradient implementation numerically using finite differences:
+\[
+\text{maximum finite difference error} = 7.173 \times 10^{-11}.
+\]
+This check is important because a small gradient bug would make the algorithm
+comparison meaningless.
 
 \section{Methods}
 
 \subsection{SGD}
 
-SGD used one randomly sampled data point per update. For a sampled index $i_t$,
-the update was
+SGD is the baseline method. At each step, it samples one index $i_t$ uniformly
+from the training set and updates
 \[
 \theta_{t+1} = \theta_t - \eta \nabla f_{i_t}(\theta_t),
 \]
-where $\theta = (w,b)$ and $f_i$ is the single-example logistic loss plus the
-regularization contribution. SGD only needs the current parameter vector and one
-stochastic gradient, so it has the smallest memory cost. The drawback is that
-the gradient estimate can have high variance, especially near the optimum.
+where $\eta$ is the learning rate. In this project, I use a constant learning
+rate for each run and tune it with a small grid search.
+
+The main advantage of SGD is simplicity. It uses one sample gradient per update
+and has very low memory cost. The main disadvantage is that the update direction
+is noisy. In the results, I expect SGD to make fast early progress but to be
+less smooth near the final objective value.
 
 \subsection{SVRG}
 
-SVRG keeps a snapshot point $\tilde{\theta}$ and computes the full gradient
-$\nabla F(\tilde{\theta})$ at that point. During the inner loop, it uses the
-variance-reduced estimator
+SVRG uses a snapshot parameter $\tilde{\theta}$. At the start of each outer
+loop, it computes the full gradient $\nabla F(\tilde{\theta})$. Then, inside
+the inner loop, it samples an index $i_t$ and uses
 \[
 v_t =
 \nabla f_{i_t}(\theta_t)
 - \nabla f_{i_t}(\tilde{\theta})
 + \nabla F(\tilde{\theta}).
 \]
-Then it updates $\theta_{t+1} = \theta_t - \eta v_t$.
+The update is
+\[
+\theta_{t+1} = \theta_t - \eta v_t.
+\]
 
-In this project, the inner loop length was set to one epoch, meaning 569 inner
-updates per snapshot. This makes the method easy to compare against SGD, but it
-also means SVRG pays for a full pass over the data at the start of every epoch.
-So SVRG has low memory overhead, but higher gradient-evaluation cost.
+The correction term makes the stochastic update closer to the full-gradient
+direction while still using a sampled index in the inner loop. In my
+implementation, the inner loop length is 569, which is exactly one pass over
+the dataset. The tradeoff is that SVRG does not store a large table of
+gradients, but it does pay for repeated full-gradient computations.
 
 \subsection{SAGA}
 
-SAGA stores a table of past per-sample gradients. At each step it samples one
-index, computes a new gradient for that sample, and combines it with the stored
-table average. In the implementation, the gradient table stored the
-unregularized per-sample gradients, and the L2 gradient was added fresh at the
-current iterate. This avoids making the stored gradients depend on an old value
-of the regularization term.
+SAGA keeps a table of stored gradients, one for each training example. At each
+step, it samples an index, computes the current per-sample gradient for that
+index, and combines it with the stored table average. A simple way to write the
+update direction is
+\[
+v_t =
+\nabla f_{i_t}(\theta_t)
+- \alpha_{i_t}
++ \frac{1}{n}\sum_{j=1}^{n}\alpha_j,
+\]
+where $\alpha_j$ is the stored gradient for sample $j$. After the update, the
+table entry for $i_t$ is replaced by the new gradient.
 
-SAGA has a lower gradient-evaluation count than SVRG in these experiments
-because it does one new stochastic gradient per update after initializing the
-gradient table. The main cost is memory: it stores one gradient vector for every
-training example. On this dataset that memory is still small, but it would grow
-linearly with both the number of examples and the number of features.
+In my implementation, the table stores the unregularized per-sample logistic
+loss gradients, and the L2 regularization gradient is added using the current
+$w$. This keeps the stored table from depending on an old value of the
+regularization term.
+
+SAGA's main cost is memory. It stores an $n \times (d+1)$ gradient table, so the
+storage grows with both the number of examples and the number of features. On
+the breast cancer dataset this is small, but the scaling is important when
+thinking about larger problems.
 
 \section{Experimental Setup}
 
-All methods used the same dataset, preprocessing, initialization, and objective.
-Each main run used 30 epochs. One epoch means 569 stochastic update steps for
-SGD and SAGA. For SVRG, one epoch means one snapshot full-gradient computation
-and 569 inner-loop updates.
+All methods use the same objective, preprocessing, initialization, and stopping
+condition. The initial parameter vector is the zero vector. Each run uses 30
+epochs. I record the objective value after
+each epoch, along with the cumulative number of gradient evaluations and the
+wall-clock runtime.
 
-The project tracked three main metrics:
-\begin{itemize}
-    \item objective value,
-    \item number of gradient evaluations,
-    \item wall-clock runtime in seconds.
-\end{itemize}
-
-The learning-rate sweeps used seed 0. The tested learning rates were
+The learning-rate grids are:
 \[
 \text{SGD: } \{0.001, 0.003, 0.01, 0.03, 0.1\},
 \]
 \[
-\text{SVRG and SAGA: } \{0.005, 0.01, 0.03, 0.05, 0.1, 0.2\}.
+\text{SVRG: } \{0.005, 0.01, 0.03, 0.05, 0.1, 0.2\},
 \]
-After the sweep, the locked learning rates used in the main comparison were
-0.03 for SGD, 0.1 for SVRG, and 0.1 for SAGA.
+\[
+\text{SAGA: } \{0.005, 0.01, 0.03, 0.05, 0.1, 0.2\}.
+\]
+After the sweep, I choose one learning rate per method for the locked
+comparison:
+\[
+\eta_{\text{SGD}} = 0.03, \quad
+\eta_{\text{SVRG}} = 0.1, \quad
+\eta_{\text{SAGA}} = 0.1.
+\]
 
-\section{Results}
+The main metrics are:
+\begin{itemize}
+    \item final objective value,
+    \item objective value versus gradient evaluations,
+    \item objective value versus runtime,
+    \item sensitivity to learning rate,
+    \item stability across seeds,
+    \item memory usage of the optimizer state.
+\end{itemize}
 
-\subsection{Main Locked Run}
+The saved seed experiment uses seeds 0, 1, and 2. I use this experiment to
+check whether one method is consistently better or whether the result is mainly
+due to one lucky random run. The current seed CSV contains SGD and SVRG, so I
+only report seed statistics for those two methods.
 
-Table~\ref{tab:main} shows the final metrics for the main locked run with seed
-0. All methods started from the same zero initialization and ran for 30 epochs.
+\section{Numerical Results}
+
+\subsection{Learning-Rate Sweep}
+
+Before comparing the methods directly, I first tune the learning rate for each
+method. Table~\ref{tab:lr-sweep} reports the best learning rate from the sweep
+for each method. The full sweep is shown visually in
+Figure~\ref{fig:lr-sweep} and is also saved in
+\texttt{outputs/lr\_sweep\_summary.csv}.
 
 \begin{table}[H]
 \centering
-\caption{Main locked comparison, seed 0.}
+\caption{Best learning rates from the sweep with 30 epochs and seed 0.}
+\label{tab:lr-sweep}
+\begin{tabular}{lrrrr}
+\toprule
+Method & Learning rate & Final loss & Gradient evals & Runtime (s) \\
+\midrule
+SVRG & 0.100 & 0.0598532343 & 51210 & 0.3574 \\
+SGD  & 0.030 & 0.0641138605 & 17070 & 0.2065 \\
+SAGA & 0.030 & 0.0603328688 & 17639 & 0.2579 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The sweep shows that all three methods need a reasonable learning rate. For
+SGD, 0.03 gave the best final loss, while 0.1 was already too aggressive. For
+SVRG, 0.1 gave the best final loss, but 0.2 made the result worse. For SAGA,
+the best swept learning rate was 0.03, not the locked value 0.1. This matters
+because SAGA at 0.03 reached a final loss close to SVRG while using many fewer
+gradient evaluations.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.72\textwidth]{outputs/lr_sweep_final_loss.png}
+\caption{Learning-rate sensitivity for SGD, SVRG, and SAGA.}
+\label{fig:lr-sweep}
+\end{figure}
+
+Figure~\ref{fig:lr-sweep} gives a visual check of the sweep. This figure is
+useful because it shows whether each method has a wide stable range or only
+works well for a narrow set of learning rates. In this experiment, the
+variance-reduced methods improved a lot when moving from very small learning
+rates to moderate ones, but both SVRG and SAGA became worse at 0.2. This was
+the clearest sign that the step size still matters even when variance reduction
+is used.
+
+\subsection{Main Comparison}
+
+After choosing the learning rates, I compare the three methods in one locked
+run. Table~\ref{tab:main} includes the final objective, runtime, and
+gradient-evaluation count for each method.
+
+\begin{table}[H]
+\centering
+\caption{Main locked comparison with seed 0.}
 \label{tab:main}
 \begin{tabular}{lrrrr}
 \toprule
@@ -158,203 +311,132 @@ SAGA & 0.10 & 0.0627392703 & 17639 & 0.2262 \\
 \end{tabular}
 \end{table}
 
-SVRG had the lowest final loss in this run. SGD was the fastest in wall-clock
-time, but it also ended with the largest loss. SAGA used almost the same number
-of gradient evaluations as SGD, plus the initial gradient-table pass, but its
-locked learning rate was not the best one from the sweep.
+This table is the main numerical summary of the project. It shows the basic
+tradeoff between objective quality, runtime, and gradient-evaluation cost.
+SVRG reached the lowest final objective value, but it used about three times as
+many gradient evaluations as SGD. SGD had the fastest runtime in this locked
+run. SAGA used almost the same gradient-evaluation budget as SGD, after its
+initial table setup, and ended between SGD and SVRG at the locked learning rate.
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=0.78\textwidth]{outputs/sgd_vs_svrg_loss_vs_grad_evals.png}
-\caption{Objective value versus gradient evaluations for the locked run.}
+\includegraphics[width=0.72\textwidth]{outputs/sgd_vs_svrg_loss_vs_grad_evals.png}
+\caption{Objective value versus gradient evaluations.}
 \label{fig:grad-evals}
 \end{figure}
 
+Figure~\ref{fig:grad-evals} compares the methods by gradient-evaluation cost
+rather than by time. This is important because the methods do different amounts
+of gradient work per epoch. SGD gets a large drop very quickly, but then its
+curve is noisy and it settles at a higher objective. SVRG decreases more
+smoothly and reaches the best final value, but it spends many more gradient
+evaluations. SAGA has a fast initial drop, but at the locked step size its curve
+is less smooth than SVRG's.
+
 \begin{figure}[H]
 \centering
-\includegraphics[width=0.78\textwidth]{outputs/sgd_vs_svrg_loss_vs_runtime.png}
-\caption{Objective value versus runtime for the locked run.}
+\includegraphics[width=0.72\textwidth]{outputs/sgd_vs_svrg_loss_vs_runtime.png}
+\caption{Objective value versus wall-clock runtime.}
 \label{fig:runtime}
 \end{figure}
 
-The gradient-evaluation plot shows the main cost difference clearly. SVRG makes
-smoother progress and reaches the best objective value, but it spends many more
-gradient evaluations because each epoch includes a full-gradient computation and
-two per-sample gradients per inner update. SGD gets a large decrease quickly,
-but then fluctuates around a higher objective value. SAGA also drops quickly,
-but the curve is less smooth at the locked step size.
+Figure~\ref{fig:runtime} compares the methods using actual runtime. This is the
+most practical view, but it also depends on implementation details and hardware.
+SGD was fastest in total time for the locked run. SVRG took longer because of
+the repeated full-gradient computations, but it also reached the best final
+objective. SAGA was between the two in runtime. The runtime plot matches the
+main tradeoff from the gradient-evaluation plot: variance reduction improves
+the final objective, but the improvement comes with extra work.
 
-\subsection{Learning-Rate Sweep}
+\subsection{Stability Across Seeds}
 
-Table~\ref{tab:best-lr} summarizes the best learning rate for each method from
-the sweep. The best value was chosen by final objective value after 30 epochs.
-
-\begin{table}[H]
-\centering
-\caption{Best learning rates from the sweep, seed 0.}
-\label{tab:best-lr}
-\begin{tabular}{lrrrr}
-\toprule
-Method & Best learning rate & Final loss & Gradient evals & Runtime (s) \\
-\midrule
-SGD  & 0.03 & 0.0641138605 & 17070 & 0.2065 \\
-SVRG & 0.10 & 0.0598532343 & 51210 & 0.3574 \\
-SAGA & 0.03 & 0.0603328688 & 17639 & 0.2579 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-This table changes the interpretation of SAGA. At learning rate 0.1, SAGA ended
-at a final loss of 0.0627392703 in the locked run. In the sweep, its best
-learning rate was 0.03, where it ended at 0.0603328688. That is close to SVRG's
-final loss while using far fewer gradient evaluations.
-
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.78\textwidth]{outputs/lr_sweep_final_loss.png}
-\caption{Final objective value after 30 epochs for each learning rate.}
-\label{fig:lr-sweep}
-\end{figure}
+Table~\ref{tab:seeds} reports the saved three-seed summary for the locked
+configuration. The file contains SGD and SVRG results for seeds 0, 1, and 2.
 
 \begin{table}[H]
 \centering
-\caption{Full learning-rate sweep, seed 0.}
-\label{tab:lr-sweep}
-\small
-\begin{tabular}{lrrrr}
-\toprule
-Method & Learning rate & Final loss & Gradient evals & Runtime (s) \\
-\midrule
-SGD  & 0.001 & 0.0904283298 & 17070 & 0.2301 \\
-SGD  & 0.003 & 0.0726797067 & 17070 & 0.2304 \\
-SGD  & 0.010 & 0.0643535930 & 17070 & 0.1775 \\
-SGD  & 0.030 & 0.0641138605 & 17070 & 0.2065 \\
-SGD  & 0.100 & 0.0705829100 & 17070 & 0.1857 \\
-\midrule
-SVRG & 0.005 & 0.0674639556 & 51210 & 0.5650 \\
-SVRG & 0.010 & 0.0631672775 & 51210 & 0.4358 \\
-SVRG & 0.030 & 0.0603956776 & 51210 & 0.3866 \\
-SVRG & 0.050 & 0.0600083114 & 51210 & 0.3215 \\
-SVRG & 0.100 & 0.0598532343 & 51210 & 0.3574 \\
-SVRG & 0.200 & 0.0817626251 & 51210 & 0.3402 \\
-\midrule
-SAGA & 0.005 & 0.0674698286 & 17639 & 0.2339 \\
-SAGA & 0.010 & 0.0631498309 & 17639 & 0.2509 \\
-SAGA & 0.030 & 0.0603328688 & 17639 & 0.2579 \\
-SAGA & 0.050 & 0.0615052350 & 17639 & 0.2241 \\
-SAGA & 0.100 & 0.0627392703 & 17639 & 0.2113 \\
-SAGA & 0.200 & 0.1091551955 & 17639 & 0.2539 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The sweep shows that all three methods are sensitive to the learning rate.
-Small learning rates were stable but slower. Very large learning rates were not
-always better. For SGD, 0.1 hurt the final loss compared with 0.03. For SVRG,
-0.2 was too large and produced a worse result. For SAGA, 0.2 was clearly too
-large in this experiment.
-
-\subsection{Seed Check}
-
-The project output folder also includes a locked three-seed summary for SGD and
-SVRG using seeds 0, 1, and 2. Those results are shown in
-Table~\ref{tab:seeds}. The available seed summary file did not include a SAGA
-row, so I treat this table as a stability check for the two methods present in
-that file rather than as a full three-method seed study.
-
-\begin{table}[H]
-\centering
-\caption{Locked seed summary from seeds 0, 1, and 2.}
+\caption{Seed stability summary from seeds 0, 1, and 2.}
 \label{tab:seeds}
-\resizebox{\textwidth}{!}{%
-\begin{tabular}{lrrrrr}
+\begin{tabular}{lrrrr}
 \toprule
-Method & Learning rate & Mean final loss & Std. final loss
-& Mean runtime (s) & Mean grad evals \\
+Method & Mean final loss & Std. final loss & Mean runtime (s) & Mean grad evals \\
 \midrule
-SGD  & 0.03 & 0.0625934339 & 0.0013355237 & 0.3879 & 17070 \\
-SVRG & 0.10 & 0.0598533388 & 0.0000094993 & 0.6513 & 51210 \\
+SGD  & 0.0625934339 & 0.0013355237 & 0.3879 & 17070 \\
+SVRG & 0.0598533388 & 0.0000094993 & 0.6513 & 51210 \\
 \bottomrule
 \end{tabular}
-}
 \end{table}
 
-The seed check supports the main observation that SVRG is more stable in final
-objective value. Its standard deviation across these three seeds was much
-smaller than SGD's. This makes sense because SVRG uses a variance-reduced
-gradient estimator, while SGD keeps using plain stochastic gradients.
+For the two reported methods, SVRG had a much smaller final-loss standard
+deviation than SGD. I do not report a SAGA seed statistic because it is not in
+the saved seed summary file.
 
-\section{Tradeoff Analysis}
+\subsection{Memory and Compute Tradeoff}
 
-Table~\ref{tab:tradeoff} summarizes the practical tradeoffs. The memory numbers
-are based on the active optimizer state in the implementation, using 64-bit
-floats, $n=569$, $d=30$, and $p=d+1=31$ parameters including the bias. This
-does not count the dataset itself, since all methods use the same data matrix.
+The dataset itself is shared by all methods, so the memory comparison in
+Table~\ref{tab:tradeoff} focuses on optimizer state.
 
 \begin{table}[H]
 \centering
-\caption{Compute and memory tradeoffs for the locked setup.}
+\caption{Memory and compute tradeoff summary.}
 \label{tab:tradeoff}
 \small
-\resizebox{\textwidth}{!}{%
-\begin{tabular}{lrrrrl}
+\begin{tabular}{lp{0.18\textwidth}p{0.27\textwidth}p{0.33\textwidth}}
 \toprule
-Method & Final loss & Grad evals & Runtime (s) & State memory & Main tradeoff \\
+Method & Extra memory & Extra compute pattern & Practical comment \\
 \midrule
-SGD  & 0.0641138605 & 17070 & 0.1774 & about 0.5 KB
-& cheapest, but noisy \\
-SVRG & 0.0598532343 & 51210 & 0.3122 & about 1.2 KB
-& best loss, more compute \\
-SAGA & 0.0627392703 & 17639 & 0.2262 & about 138.5 KB
-& more memory, fewer evals than SVRG \\
+SGD  & about 0.5 KB & one sample gradient per step & lowest memory, noisy final behavior \\
+SVRG & about 1.2 KB & periodic full gradients & best final loss, highest grad evals \\
+SAGA & about 138.5 KB & stored gradient table & good tuned loss, largest memory \\
 \bottomrule
 \end{tabular}
-}
 \end{table}
 
-For this small dataset, the memory cost of SAGA is not a real problem. Its
-gradient table is only about 138.5 KB. But the scaling matters. If the dataset
-had millions of examples or a much larger feature dimension, SAGA's $O(nd)$
-memory could become expensive. SGD and SVRG only need $O(d)$ optimizer state, so
-they are much easier to scale in memory.
+For this dataset, SAGA's memory use is still small in absolute terms. The
+important point is scaling: SAGA grows with $n(d+1)$, while SGD and SVRG use
+only small $O(d)$ optimizer state.
 
-In terms of convergence quality, SVRG was the strongest method in the locked
-comparison. It reached the lowest loss and had the smoothest final behavior.
-The cost is that it used 51210 gradient evaluations, compared with 17070 for SGD
-and 17639 for SAGA. So SVRG is attractive when gradient evaluations are cheap
-enough and we care about getting a slightly lower objective value.
+\section{Discussion / Take-Home Messages}
 
-SAGA is most worth its memory cost when the gradient table fits comfortably in
-memory and when a well-tuned learning rate is used. In the sweep, SAGA with
-learning rate 0.03 reached 0.0603328688, which was close to SVRG's 0.0598532343,
-while using about one third as many gradient evaluations. That is the strongest
-case for SAGA in this project. The weaker case is the locked learning rate 0.1,
-where SAGA was still reasonable but not as good as its tuned result.
-
-SGD is still useful as a baseline. It was easy to implement, used the least
-memory, and had the fastest locked runtime. But it did not reach the same final
-objective value as the variance-reduced methods. In this experiment, SGD is the
-best choice if simplicity and runtime are more important than squeezing out the
-lowest objective value.
+Variance reduction helped, but the benefit was not free.
+\begin{itemize}
+    \item \textbf{Fastest early progress:} SGD and SAGA made the largest early
+    drops; SGD was especially cheap in gradient evaluations.
+    \item \textbf{Best final objective:} SVRG had the best locked final loss,
+    0.0598532343. SAGA's best swept result was close at 0.0603328688.
+    \item \textbf{Most stable method:} For saved seed results, SVRG was most
+    stable: $9.4993 \times 10^{-6}$ final-loss standard deviation versus
+    $1.3355 \times 10^{-3}$ for SGD.
+    \item \textbf{Lowest memory cost:} SGD used the least memory. SAGA used the
+    most because of its gradient table.
+    \item \textbf{Practical choice:} SGD is best for simplicity, SVRG for the
+    lowest objective when full-gradient passes are affordable, and SAGA when the
+    gradient table fits in memory and the step size is tuned.
+\end{itemize}
+The main limitation is that this is one small convex dataset, so the results
+are a controlled tradeoff study rather than a universal benchmark.
 
 \section{Conclusion}
 
-This project compared SGD, SVRG, and SAGA on the same convex logistic regression
-problem. The experiment was intentionally kept simple: same dataset, same
-preprocessing, same initialization, same number of epochs, and the same
-objective for all methods.
+SVRG gave the best final objective value, SGD was the cheapest and fastest
+locked baseline, and SAGA became competitive when its learning rate was tuned
+carefully. The practical lesson is that variance reduction can help on this
+convex finite-sum problem, but it trades off against extra gradient work for
+SVRG or extra memory for SAGA.
 
-The main takeaway is that variance reduction helped. SVRG reached the lowest
-final loss in the locked comparison and was also very stable across the seed
-check. Its downside was the extra compute from repeated full-gradient
-calculations. SAGA was competitive when tuned properly, especially at learning
-rate 0.03, where it came close to SVRG while using far fewer gradient
-evaluations. Its main downside is the gradient table memory, which is small here
-but can matter for larger datasets.
+\section*{References}
+\small
 
-Overall, I would choose SGD for the simplest and fastest baseline, SVRG when I
-want the most reliable final objective value and can afford more gradient
-evaluations, and SAGA when the gradient table fits in memory and the learning
-rate has been tuned carefully.
+\noindent [1] A. Defazio, F. Bach, and S. Lacoste-Julien. SAGA: A Fast
+Incremental Gradient Method With Support for Non-Strongly Convex Composite
+Objectives. 2014.
+
+\noindent [2] R. Johnson and T. Zhang. Accelerating Stochastic Gradient Descent
+using Predictive Variance Reduction. 2013.
+
+\noindent [3] H. Robbins and S. Monro. A Stochastic Approximation Method. 1951.
+
+\noindent [4] L. Bottou, F. E. Curtis, and J. Nocedal. Optimization Methods for
+Large-Scale Machine Learning. 2018.
 
 \end{document}
