@@ -22,6 +22,7 @@ try:
     )
     from sgd import SGDResult, run_sgd
     from svrg import SVRGResult, run_svrg
+    from saga import SAGAResult, run_saga
 except ModuleNotFoundError:
     from .data_objective import DEFAULT_L2_REG, make_objective
     from .optimizer_common import (
@@ -36,10 +37,12 @@ except ModuleNotFoundError:
     )
     from .sgd import SGDResult, run_sgd
     from .svrg import SVRGResult, run_svrg
+    from .saga import SAGAResult, run_saga
 
 
 LOCKED_SGD_STEP_SIZE = 0.03
 LOCKED_SVRG_STEP_SIZE = 0.1
+LOCKED_SAGA_STEP_SIZE = 0.1
 DEFAULT_SEEDS = [0, 1, 2]
 
 
@@ -47,11 +50,12 @@ def run_comparison(
     epochs: int = 30,
     sgd_step_size: float = LOCKED_SGD_STEP_SIZE,
     svrg_step_size: float = LOCKED_SVRG_STEP_SIZE,
+    saga_step_size: float = LOCKED_SAGA_STEP_SIZE,
     seed: int = 0,
     l2_reg: float = DEFAULT_L2_REG,
     output_dir: Path = Path("Project/outputs"),
-) -> tuple[SGDResult, SVRGResult]:
-    """Run SGD and SVRG from the same initial theta and save logs/plots."""
+) -> tuple[SGDResult, SVRGResult, SAGAResult]:
+    """Run SGD, SVRG, and SAGA from the same initial theta and save logs/plots."""
 
     objective = make_objective(l2_reg=l2_reg)
     theta0 = objective.initial_theta()
@@ -71,23 +75,31 @@ def run_comparison(
         inner_loop_steps=objective.n_samples,
         seed=seed,
     )
+    saga_result = run_saga(
+        objective=objective,
+        theta0=theta0,
+        step_size=saga_step_size,
+        epochs=epochs,
+        seed=seed,
+    )
 
     results: dict[str, OptimizationResult] = {
         "SGD": sgd_result,
         "SVRG": svrg_result,
+        "SAGA": saga_result,
     }
     write_trace_csv(output_dir / "sgd_vs_svrg_trace.csv", results)
     plot_loss_vs_gradient_evaluations(
         output_dir / "sgd_vs_svrg_loss_vs_grad_evals.png", results
     )
     plot_loss_vs_runtime(output_dir / "sgd_vs_svrg_loss_vs_runtime.png", results)
-    print("SGD vs SVRG comparison")
+    print("SGD vs SVRG vs SAGA comparison")
     print_summary(results)
     print(f"trace: {output_dir / 'sgd_vs_svrg_trace.csv'}")
     print(f"plot: {output_dir / 'sgd_vs_svrg_loss_vs_grad_evals.png'}")
     print(f"runtime plot: {output_dir / 'sgd_vs_svrg_loss_vs_runtime.png'}")
 
-    return sgd_result, svrg_result
+    return sgd_result, svrg_result, saga_result
 
 
 def run_seed_replicates(
@@ -95,6 +107,7 @@ def run_seed_replicates(
     seeds: list[int] | None = None,
     sgd_step_size: float = LOCKED_SGD_STEP_SIZE,
     svrg_step_size: float = LOCKED_SVRG_STEP_SIZE,
+    saga_step_size: float = LOCKED_SAGA_STEP_SIZE,
     l2_reg: float = DEFAULT_L2_REG,
     output_dir: Path = Path("Project/outputs"),
 ) -> dict[str, dict[str, float]]:
@@ -127,6 +140,15 @@ def run_seed_replicates(
                 seed=seed,
             )
         )
+        results.append(
+            run_saga(
+                objective=objective,
+                theta0=theta0,
+                step_size=saga_step_size,
+                epochs=epochs,
+                seed=seed,
+            )
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     per_seed_path = output_dir / "locked_seed_runs.csv"
@@ -152,6 +174,7 @@ def run_lr_sweeps(
     epochs: int = 30,
     sgd_step_sizes: list[float] | None = None,
     svrg_step_sizes: list[float] | None = None,
+    saga_step_sizes: list[float] | None = None,
     seed: int = 0,
     l2_reg: float = DEFAULT_L2_REG,
     output_dir: Path = Path("Project/outputs"),
@@ -162,6 +185,8 @@ def run_lr_sweeps(
         sgd_step_sizes = [0.001, 0.003, 0.01, 0.03, 0.1]
     if svrg_step_sizes is None:
         svrg_step_sizes = [0.005, 0.01, 0.03, 0.05, 0.1, 0.2]
+    if saga_step_sizes is None:
+        saga_step_sizes = [0.005, 0.01, 0.03, 0.05, 0.1, 0.2]
 
     objective = make_objective(l2_reg=l2_reg)
     theta0 = objective.initial_theta()
@@ -186,6 +211,17 @@ def run_lr_sweeps(
                 step_size=step_size,
                 epochs=epochs,
                 inner_loop_steps=objective.n_samples,
+                seed=seed,
+            )
+        )
+
+    for step_size in saga_step_sizes:
+        results.append(
+            run_saga(
+                objective=objective,
+                theta0=theta0,
+                step_size=step_size,
+                epochs=epochs,
                 seed=seed,
             )
         )
@@ -308,6 +344,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--sgd-step-size", type=float, default=LOCKED_SGD_STEP_SIZE)
     parser.add_argument("--svrg-step-size", type=float, default=LOCKED_SVRG_STEP_SIZE)
+    parser.add_argument("--saga-step-size", type=float, default=LOCKED_SAGA_STEP_SIZE)
     parser.add_argument(
         "--sgd-sweep",
         type=str,
@@ -319,6 +356,12 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default="0.005,0.01,0.03,0.05,0.1,0.2",
         help="Comma-separated SVRG learning rates.",
+    )
+    parser.add_argument(
+        "--saga-sweep",
+        type=str,
+        default="0.005,0.01,0.03,0.05,0.1,0.2",
+        help="Comma-separated SAGA learning rates.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
@@ -353,6 +396,7 @@ def main() -> None:
         epochs=args.epochs,
         sgd_step_size=args.sgd_step_size,
         svrg_step_size=args.svrg_step_size,
+        saga_step_size=args.saga_step_size,
         seed=args.seed,
         l2_reg=args.l2_reg,
         output_dir=args.output_dir,
@@ -362,6 +406,7 @@ def main() -> None:
             epochs=args.epochs,
             sgd_step_sizes=parse_step_sizes(args.sgd_sweep),
             svrg_step_sizes=parse_step_sizes(args.svrg_sweep),
+            saga_step_sizes=parse_step_sizes(args.saga_sweep),
             seed=args.seed,
             l2_reg=args.l2_reg,
             output_dir=args.output_dir,
@@ -372,6 +417,7 @@ def main() -> None:
             seeds=_parse_seeds(args.seeds),
             sgd_step_size=args.sgd_step_size,
             svrg_step_size=args.svrg_step_size,
+            saga_step_size=args.saga_step_size,
             l2_reg=args.l2_reg,
             output_dir=args.output_dir,
         )
