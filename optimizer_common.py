@@ -43,10 +43,15 @@ class OptimizationResult:
     epochs: int
     seed: int
     metadata: dict[str, float | int | str] = field(default_factory=dict)
+    val_losses: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))
 
     @property
     def final_loss(self) -> float:
         return float(self.losses[-1])
+
+    @property
+    def final_val_loss(self) -> float | None:
+        return float(self.val_losses[-1]) if len(self.val_losses) > 0 else None
 
     @property
     def total_gradient_evaluations(self) -> int:
@@ -60,15 +65,23 @@ class OptimizationResult:
 class CheckpointLogger:
     """Collect loss/runtime/gradient-evaluation checkpoints."""
 
-    def __init__(self, objective: LogisticRegressionObjective) -> None:
+    def __init__(
+        self,
+        objective: LogisticRegressionObjective,
+        val_objective: LogisticRegressionObjective | None = None,
+    ) -> None:
         self.objective = objective
+        self.val_objective = val_objective
         self.start_time = time.perf_counter()
         self.losses: list[float] = []
+        self.val_losses: list[float] = []
         self.gradient_evaluations: list[int] = []
         self.runtimes: list[float] = []
 
     def record(self, theta: np.ndarray, gradient_evaluations: int) -> None:
         self.losses.append(self.objective.objective(theta))
+        if self.val_objective is not None:
+            self.val_losses.append(self.val_objective.objective(theta))
         self.gradient_evaluations.append(gradient_evaluations)
         self.runtimes.append(time.perf_counter() - self.start_time)
 
@@ -91,6 +104,7 @@ class CheckpointLogger:
             epochs=epochs,
             seed=seed,
             metadata={} if metadata is None else metadata,
+            val_losses=np.asarray(self.val_losses, dtype=float),
         )
 
 
@@ -240,10 +254,90 @@ def plot_sweep_final_losses(
     plt.close(fig)
 
 
+def estimate_optimal_loss(objective: LogisticRegressionObjective) -> float:
+    """Run L-BFGS-B to high precision to estimate F*."""
+
+    from scipy.optimize import minimize
+
+    result = minimize(
+        fun=objective.objective,
+        x0=objective.initial_theta(),
+        jac=objective.full_gradient,
+        method="L-BFGS-B",
+        options={"maxiter": 10000, "ftol": 1e-15, "gtol": 1e-12},
+    )
+    return float(result.fun)
+
+
+def plot_convergence_analysis(
+    output_path: Path,
+    results: dict[str, OptimizationResult],
+    f_star: float,
+) -> None:
+    """Semilogy plot of F(θ) − F* vs gradient evaluations.
+
+    A straight line on this plot confirms the linear convergence rate
+    predicted by theory for strongly convex objectives.  SGD with constant
+    step size will level off (noise floor), while SVRG and SAGA should
+    continue falling linearly.
+    """
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7.2, 4.8))
+
+    for method, result in results.items():
+        excess = result.losses - f_star
+        valid = excess > 0
+        if not valid.any():
+            continue
+        ax.semilogy(
+            result.gradient_evaluations[valid],
+            excess[valid],
+            marker="o",
+            linewidth=2.0,
+            markersize=3.5,
+            label=method,
+        )
+
+    ax.set_xlabel("Gradient evaluations")
+    ax.set_ylabel("F(θ) − F*  (log scale)")
+    ax.set_title("Convergence Analysis")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_val_loss_vs_gradient_evaluations(
+    output_path: Path,
+    results: dict[str, OptimizationResult],
+) -> None:
+    """Save validation objective value vs gradient evaluations."""
+
+    results_with_val = {m: r for m, r in results.items() if r.final_val_loss is not None}
+    if not results_with_val:
+        return
+    _plot_metric(
+        output_path=output_path,
+        results=results_with_val,
+        x_attr="gradient_evaluations",
+        x_label="Gradient evaluations",
+        title="Validation Loss vs Gradient Evaluations",
+        y_attr="val_losses",
+        y_label="Validation loss",
+    )
+
+
 def print_summary(results: dict[str, OptimizationResult]) -> None:
     for method, result in results.items():
+        val_str = (
+            f", val loss={result.final_val_loss:.8f}"
+            if result.final_val_loss is not None
+            else ""
+        )
         print(
-            f"{method}: final loss={result.final_loss:.8f}, "
+            f"{method}: final loss={result.final_loss:.8f}{val_str}, "
             f"grad evals={result.total_gradient_evaluations}, "
             f"runtime={result.total_runtime:.6f}s, "
             f"step size={result.step_size:g}"
@@ -263,6 +357,8 @@ def _plot_metric(
     x_attr: str,
     x_label: str,
     title: str,
+    y_attr: str = "losses",
+    y_label: str = "Objective value",
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -270,7 +366,7 @@ def _plot_metric(
     for method, result in results.items():
         ax.plot(
             getattr(result, x_attr),
-            result.losses,
+            getattr(result, y_attr),
             marker="o",
             linewidth=2.0,
             markersize=3.5,
@@ -278,7 +374,7 @@ def _plot_metric(
         )
 
     ax.set_xlabel(x_label)
-    ax.set_ylabel("Objective value")
+    ax.set_ylabel(y_label)
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
     ax.legend()

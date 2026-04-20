@@ -9,13 +9,21 @@ from pathlib import Path
 import numpy as np
 
 try:
-    from data_objective import DEFAULT_L2_REG, make_objective
+    from data_objective import (
+        DEFAULT_L2_REG,
+        LogisticRegressionObjective,
+        load_breast_cancer_data_split,
+        make_objective,
+    )
     from optimizer_common import (
         OptimizationResult,
+        estimate_optimal_loss,
         parse_step_sizes,
+        plot_convergence_analysis,
         plot_loss_vs_gradient_evaluations,
         plot_loss_vs_runtime,
         plot_sweep_final_losses,
+        plot_val_loss_vs_gradient_evaluations,
         print_summary,
         write_sweep_summary_csv,
         write_trace_csv,
@@ -24,13 +32,21 @@ try:
     from svrg import SVRGResult, run_svrg
     from saga import SAGAResult, run_saga
 except ModuleNotFoundError:
-    from .data_objective import DEFAULT_L2_REG, make_objective
+    from .data_objective import (
+        DEFAULT_L2_REG,
+        LogisticRegressionObjective,
+        load_breast_cancer_data_split,
+        make_objective,
+    )
     from .optimizer_common import (
         OptimizationResult,
+        estimate_optimal_loss,
         parse_step_sizes,
+        plot_convergence_analysis,
         plot_loss_vs_gradient_evaluations,
         plot_loss_vs_runtime,
         plot_sweep_final_losses,
+        plot_val_loss_vs_gradient_evaluations,
         print_summary,
         write_sweep_summary_csv,
         write_trace_csv,
@@ -42,7 +58,7 @@ except ModuleNotFoundError:
 
 LOCKED_SGD_STEP_SIZE = 0.03
 LOCKED_SVRG_STEP_SIZE = 0.1
-LOCKED_SAGA_STEP_SIZE = 0.1
+LOCKED_SAGA_STEP_SIZE = 0.03
 DEFAULT_SEEDS = [0, 1, 2]
 
 
@@ -57,30 +73,39 @@ def run_comparison(
 ) -> tuple[SGDResult, SVRGResult, SAGAResult]:
     """Run SGD, SVRG, and SAGA from the same initial theta and save logs/plots."""
 
-    objective = make_objective(l2_reg=l2_reg)
-    theta0 = objective.initial_theta()
+    train_data, val_data = load_breast_cancer_data_split(seed=seed)
+    train_objective = LogisticRegressionObjective(data=train_data, l2_reg=l2_reg)
+    val_objective = LogisticRegressionObjective(data=val_data, l2_reg=l2_reg)
+    theta0 = train_objective.initial_theta()
+
+    print("Estimating F* via L-BFGS-B...", flush=True)
+    f_star = estimate_optimal_loss(train_objective)
+    print(f"F* ≈ {f_star:.10f}")
 
     sgd_result = run_sgd(
-        objective=objective,
+        objective=train_objective,
         theta0=theta0,
         step_size=sgd_step_size,
         epochs=epochs,
         seed=seed,
+        val_objective=val_objective,
     )
     svrg_result = run_svrg(
-        objective=objective,
+        objective=train_objective,
         theta0=theta0,
         step_size=svrg_step_size,
         epochs=epochs,
-        inner_loop_steps=objective.n_samples,
+        inner_loop_steps=train_objective.n_samples,
         seed=seed,
+        val_objective=val_objective,
     )
     saga_result = run_saga(
-        objective=objective,
+        objective=train_objective,
         theta0=theta0,
         step_size=saga_step_size,
         epochs=epochs,
         seed=seed,
+        val_objective=val_objective,
     )
 
     results: dict[str, OptimizationResult] = {
@@ -88,16 +113,25 @@ def run_comparison(
         "SVRG": svrg_result,
         "SAGA": saga_result,
     }
+    output_dir.mkdir(parents=True, exist_ok=True)
     write_trace_csv(output_dir / "sgd_vs_svrg_trace.csv", results)
     plot_loss_vs_gradient_evaluations(
         output_dir / "sgd_vs_svrg_loss_vs_grad_evals.png", results
     )
     plot_loss_vs_runtime(output_dir / "sgd_vs_svrg_loss_vs_runtime.png", results)
+    plot_val_loss_vs_gradient_evaluations(
+        output_dir / "val_loss_vs_grad_evals.png", results
+    )
+    plot_convergence_analysis(
+        output_dir / "convergence_analysis.png", results, f_star=f_star
+    )
     print("SGD vs SVRG vs SAGA comparison")
     print_summary(results)
+    print(f"train/val split: {train_objective.n_samples} / {val_objective.n_samples}")
     print(f"trace: {output_dir / 'sgd_vs_svrg_trace.csv'}")
-    print(f"plot: {output_dir / 'sgd_vs_svrg_loss_vs_grad_evals.png'}")
-    print(f"runtime plot: {output_dir / 'sgd_vs_svrg_loss_vs_runtime.png'}")
+    print(f"train loss plot: {output_dir / 'sgd_vs_svrg_loss_vs_grad_evals.png'}")
+    print(f"val loss plot: {output_dir / 'val_loss_vs_grad_evals.png'}")
+    print(f"convergence plot: {output_dir / 'convergence_analysis.png'}")
 
     return sgd_result, svrg_result, saga_result
 

@@ -42,6 +42,7 @@ def run_svrg(
     inner_loop_steps: int | None = None,
     seed: int = 0,
     record_every_steps: int | None = None,
+    val_objective: LogisticRegressionObjective | None = None,
 ) -> SVRGResult:
     """Run SVRG with snapshot frequency approximately one epoch.
 
@@ -83,7 +84,7 @@ def run_svrg(
     rng = np.random.default_rng(seed)
     total_steps = epochs * inner_loop_steps
 
-    logger = CheckpointLogger(objective)
+    logger = CheckpointLogger(objective, val_objective=val_objective)
     logger.record(theta=theta, gradient_evaluations=0)
 
     grad_evals = 0

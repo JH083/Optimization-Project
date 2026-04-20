@@ -36,6 +36,7 @@ def run_sgd(
     epochs: int = 30,
     seed: int = 0,
     record_every_steps: int | None = None,
+    val_objective: LogisticRegressionObjective | None = None,
 ) -> SGDResult:
     """Run SGD with one random sample per update.
 
@@ -70,7 +71,7 @@ def run_sgd(
     rng = np.random.default_rng(seed)
     total_steps = epochs * objective.n_samples
 
-    logger = CheckpointLogger(objective)
+    logger = CheckpointLogger(objective, val_objective=val_objective)
     logger.record(theta=theta, gradient_evaluations=0)
 
     grad_evals = 0

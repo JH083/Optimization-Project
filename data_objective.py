@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
 
@@ -156,6 +157,37 @@ def load_breast_cancer_data() -> BinaryClassificationData:
         feature_names=tuple(raw.feature_names),
         target_names=tuple(raw.target_names),
     )
+
+
+def load_breast_cancer_data_split(
+    test_size: float = 0.2,
+    seed: int = 0,
+) -> tuple[BinaryClassificationData, BinaryClassificationData]:
+    """Return stratified train/test splits with scaler fit on train only."""
+
+    raw = load_breast_cancer()
+    X_raw = raw.data.astype(float)
+    y = np.where(raw.target == 1, 1.0, -1.0)
+
+    X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+        X_raw, y, test_size=test_size, random_state=seed, stratify=raw.target
+    )
+
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train_raw)
+    X_test = scaler.transform(X_test_raw)
+
+    feature_names = tuple(raw.feature_names)
+    target_names = tuple(raw.target_names)
+    train_data = BinaryClassificationData(
+        X=X_train, y=y_train,
+        feature_names=feature_names, target_names=target_names,
+    )
+    val_data = BinaryClassificationData(
+        X=X_test, y=y_test,
+        feature_names=feature_names, target_names=target_names,
+    )
+    return train_data, val_data
 
 
 def make_objective(l2_reg: float = DEFAULT_L2_REG) -> LogisticRegressionObjective:

@@ -41,6 +41,7 @@ def run_saga(
     epochs: int = 30,
     seed: int = 0,
     record_every_steps: int | None = None,
+    val_objective: LogisticRegressionObjective | None = None,
 ) -> SAGAResult:
     """Run SAGA from a given (or default zero) starting point.
 
@@ -90,7 +91,7 @@ def run_saga(
     rng = np.random.default_rng(seed)
     total_steps = epochs * n
 
-    logger = CheckpointLogger(objective)
+    logger = CheckpointLogger(objective, val_objective=val_objective)
     logger.record(theta=theta, gradient_evaluations=n)
 
     grad_evals = n
