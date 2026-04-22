@@ -1,28 +1,30 @@
-\documentclass[11pt]{article}
+\documentclass{article}
 
-\usepackage[margin=1in]{geometry}
-\usepackage{amsmath, amssymb}
+% NeurIPS style
+    \usepackage[final]{style}
+
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{amssymb}
 \usepackage{booktabs}
 \usepackage{graphicx}
 \usepackage{float}
 \usepackage{caption}
-\usepackage{enumitem}
-\usepackage{url}
-\usepackage{microtype}
-
-\captionsetup{font=small}
-\setlist[itemize]{leftmargin=*, itemsep=2pt, topsep=3pt}
-\setlist[enumerate]{leftmargin=*, itemsep=2pt, topsep=3pt}
-\setlength{\textfloatsep}{10pt plus 2pt minus 2pt}
-\setlength{\floatsep}{10pt plus 2pt minus 2pt}
-\setlength{\intextsep}{10pt plus 2pt minus 2pt}
-\renewcommand{\arraystretch}{1.08}
 
 \title{A Reproducibility Study of SGD, SVRG, and SAGA on Regularized Logistic Regression}
-\author{Jihyun Kim and William Zhang}
-\date{}
+\author{
+  William Zhang \\
+  Carnegie Mellon University \\
+  \texttt{wz4@andrew.cmu.edu}
+  \And
+  Jihyun Kim \\
+  Carnegie Mellon University \\
+  \texttt{jihyunki@cmu.edu}
+}
 
 \begin{document}
+
 \maketitle
 
 \begin{abstract}
@@ -474,8 +476,9 @@ validation-loss improvement. The practical lesson is that variance reduction can
 help on this convex finite-sum problem, but it trades off against extra gradient
 work for SVRG or extra memory for SAGA.
 
-\section*{References}
+{
 \small
+\section*{References}
 
 \noindent [1] A. Defazio, F. Bach, and S. Lacoste-Julien. SAGA: A Fast
 Incremental Gradient Method With Support for Non-Strongly Convex Composite
@@ -488,5 +491,7 @@ using Predictive Variance Reduction. 2013.
 
 \noindent [4] L. Bottou, F. E. Curtis, and J. Nocedal. Optimization Methods for
 Large-Scale Machine Learning. 2018.
+}
+\newpage
 
 \end{document}

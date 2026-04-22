@@ -1,0 +1,36 @@
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{style}[2026/04/21 Local NeurIPS-like report style]
+
+\DeclareOption{final}{}
+\ProcessOptions\relax
+
+\RequirePackage[letterpaper,margin=1in]{geometry}
+\RequirePackage{times}
+\RequirePackage{microtype}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt plus 1pt minus 1pt}
+\setlength{\textfloatsep}{10pt plus 2pt minus 2pt}
+\setlength{\floatsep}{10pt plus 2pt minus 2pt}
+\setlength{\intextsep}{10pt plus 2pt minus 2pt}
+\renewcommand{\arraystretch}{1.08}
+
+\providecommand{\And}{}
+\providecommand{\AND}{}
+\AtBeginDocument{%
+  \renewcommand{\And}{\\[1em]}%
+  \renewcommand{\AND}{\\[1em]}%
+}
+
+\renewcommand{\maketitle}{%
+  \begin{center}%
+    {\LARGE\bfseries \@title \par}%
+    \vskip 1.0em%
+    {\large
+      \lineskip .5em%
+      \begin{tabular}[t]{c}%
+        \@author%
+      \end{tabular}\par}%
+  \end{center}%
+  \vskip 1.5em%
+}
